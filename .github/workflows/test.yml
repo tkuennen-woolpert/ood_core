@@ -18,6 +18,10 @@ jobs:
         include:
           - ruby: "3.0.2"
             bundler: "2.3.5"
+          - ruby: "3.1"
+            bundler: "2.3.5"
+          - ruby: "3.2"
+            bundler: "2.3.5"
     runs-on: ubuntu-latest
     steps:
       - name: checkout
@@ -32,5 +36,8 @@ jobs:
       - name: install gems
         run: bundle install
 
-      - name: test
+      - name: rspec test
         run: bundle exec rake spec
+
+      - name: mini test
+        run: bundle exec rake test

@@ -163,7 +163,7 @@ module OodCore
         # @return [Info] information describing submitted job
         def info(id)
           filename = id.to_s+'.json'
-          if File.exists?(guac_spool+"/status/"+filename)
+          if File.exist?(guac_spool+"/status/"+filename)
             info = read_status(filename)  
           else
             info = Info.new(

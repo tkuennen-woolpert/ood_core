@@ -1,6 +1,6 @@
 #!/bin/bash
 SSH_HOSTS=(<%= ssh_hosts.join(' ').to_s %>)
-hostnames=`hostname -A`
+hostnames=`hostname -A 2>/dev/null || hostname`
 for host in ${SSH_HOSTS[@]}
 do
     if [[ " ${hostnames[@]} " =~ " ${host} " ]]; then
@@ -53,4 +53,5 @@ chmod +x "$systemd_service_file_pre" "$systemd_service_file" "$systemd_service_f
 systemd-run --user -r --no-block --unit=<%= session_name %> -p RuntimeMaxSec=<%= script_timeout %> \
 	-p ExecStartPre="$systemd_service_file_pre" -p ExecStartPost="$systemd_service_file_post" \
 	-p StandardOutput="file:<%= output_path %>" -p StandardError="file:<%= error_path %>" \
+    <%= resource_properties %> \
 	-p Description="<%= job_name %>" "$systemd_service_file"

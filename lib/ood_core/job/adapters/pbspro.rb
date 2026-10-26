@@ -1,3 +1,5 @@
+require "json"
+require "set"
 require "time"
 require "ood_core/refinements/hash_extensions"
 require "ood_core/job/adapters/helper"
@@ -39,6 +41,13 @@ module OodCore
         # Object used for simplified communication with a PBS Pro batch server
         # @api private
         class Batch
+          # Node state tokens that mark a node as unavailable for scheduling.
+          # PBS Pro may report compound states (e.g. "offline,down",
+          # "state-unknown"), so states are tokenized before lookup.
+          UNAVAILABLE_NODE_STATES = Set.new(
+            %w[down offline drain drained maint maintenance unknown]
+          ).freeze
+
           # The host of the PBS Pro batch server
           # @example
           #   my_batch.host #=> "my_batch.server.edu"
@@ -83,6 +92,38 @@ module OodCore
             @strict_host_checking = strict_host_checking
             @pbs_exec             = pbs_exec && Pathname.new(pbs_exec.to_s)
             @bin_overrides        = bin_overrides
+          end
+
+          # Get a ClusterInfo object containing information about the given cluster
+          # @return [ClusterInfo] object containing cluster details
+          def get_cluster_info
+            data = JSON.parse(call("pbsnodes", "-aSj", "-F", "json"))
+            nodes_h = data.fetch("nodes", {})
+
+            stats = nodes_h.values.each_with_object(Hash.new(0)) do |info, acc|
+              state = info.fetch("state", "").to_s.downcase
+              next if state.split(/\W+/).any? { |token| UNAVAILABLE_NODE_STATES.include?(token) }
+
+              f_c, t_c = parse_free_total(info["ncpus f/t"])
+              f_g, t_g = parse_free_total(info["ngpus f/t"])
+
+              acc[:available_nodes] += 1
+              acc[:busy_nodes] += 1 if f_c == 0 || (f_g == 0 && t_g > 0)
+
+              acc[:free_ncpus] += f_c
+              acc[:total_ncpus] += t_c
+              acc[:free_gpus] += f_g
+              acc[:total_gpus] += t_g
+            end
+
+            ClusterInfo.new(
+              active_nodes: stats[:busy_nodes],
+              total_nodes: stats[:available_nodes],
+              active_processors: stats[:total_ncpus] - stats[:free_ncpus],
+              total_processors: stats[:total_ncpus],
+              active_gpus: stats[:total_gpus] - stats[:free_gpus],
+              total_gpus: stats[:total_gpus]
+            )
           end
 
           # Get a list of hashes detailing each of the jobs on the batch server
@@ -174,6 +215,14 @@ module OodCore
           end
 
           private
+            # Parse a PBS Pro "free/total" field (e.g. "3/8") into a pair of integers
+            # @param str [#to_s] the "free/total" field to parse
+            # @return [Array(Integer, Integer)] the free and total counts, or [0, 0] if unparseable
+            def parse_free_total(str)
+              m = str.to_s.strip.match(/\A(\d+)\s*\/\s*(\d+)\z/)
+              m ? [m[1].to_i, m[2].to_i] : [0, 0]
+            end
+
             # Call a forked PBS Pro command for a given batch server
             def call(cmd, *args, env: {}, stdin: "", chdir: nil)
               cmd = cmd.to_s
@@ -239,6 +288,7 @@ module OodCore
         #   job
         # @see Adapter#submit
         def submit(script, after: [], afterok: [], afternotok: [], afterany: [])
+          validate_native(script, Array)
           after      = Array(after).map(&:to_s)
           afterok    = Array(afterok).map(&:to_s)
           afternotok = Array(afternotok).map(&:to_s)
@@ -269,6 +319,7 @@ module OodCore
           args.concat ["-a", script.start_time.localtime.strftime("%C%y%m%d%H%M.%S")] unless script.start_time.nil?
           args.concat ["-A", script.accounting_id] unless script.accounting_id.nil?
           args.concat ["-l", "walltime=#{seconds_to_duration(script.wall_time)}"] unless script.wall_time.nil?
+          args.concat ['-l', "mem=#{script.memory}"] unless script.memory.nil?
           args.concat ppn(script)
 
           # Set dependencies
@@ -297,6 +348,12 @@ module OodCore
           @pbspro.submit_string(script.content, args: args, chdir: script.workdir)
         rescue Batch::Error => e
           raise JobAdapterError, e.message
+        end
+
+        # Retrieve info about active and total cpus, gpus, and nodes
+        # @return [Hash] information about cluster usage
+        def cluster_info
+          @pbspro.get_cluster_info
         end
 
         # Retrieve info for all jobs from the resource manager
@@ -423,6 +480,12 @@ module OodCore
           '#PBS'
         end
 
+        # Whether the adapter supports job dependencies
+        # @return [Boolean] - true
+        def supports_job_dependencies?
+          true
+        end
+        
         # place holder for when we support both nodes and cpus.
         def ppn(script)
           return [] if script.cores.nil?

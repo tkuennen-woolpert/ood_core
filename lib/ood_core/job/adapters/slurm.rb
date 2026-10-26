@@ -25,7 +25,13 @@ module OodCore
         bin_overrides        = c.fetch(:bin_overrides, {})
         submit_host          = c.fetch(:submit_host, "")
         strict_host_checking = c.fetch(:strict_host_checking, true)
-        slurm = Adapters::Slurm::Batch.new(cluster: cluster, conf: conf, bin: bin, bin_overrides: bin_overrides, submit_host: submit_host, strict_host_checking: strict_host_checking)
+        id                   = c.fetch(:id, 'unknown')
+
+        slurm = Adapters::Slurm::Batch.new(
+          cluster: cluster, conf: conf, bin: bin, bin_overrides: bin_overrides,
+          submit_host: submit_host, strict_host_checking: strict_host_checking,
+          id: id
+        )
         Adapters::Slurm.new(slurm: slurm)
       end
     end
@@ -37,18 +43,45 @@ module OodCore
         using Refinements::HashExtensions
         using Refinements::ArrayExtensions
 
-        # Get integer representing the number of gpus used by a node or job,
-        # calculated from gres string
-        # @return [Integer] the number of gpus in gres
-        def self.gpus_from_gres(gres)
-          gres.to_s.scan(/gpu[^(,]*[:=](\d+)/).flatten.map(&:to_i).sum
+        require "ood_core/job/adapters/slurm/parsing"
+        include Parsing
+        extend Parsing
+
+        # Slurm interprets absolute timestamps in the cluster's timezone, so
+        # express a time relative to "now" to stay correct when OnDemand runs
+        # in a different timezone than the cluster.
+        # @example
+        #   relative_time(Time.now + 3600) #=> "now+3600"
+        # @param time [#to_time] the time to convert
+        # @param now [Time] the current time
+        # @return [String] the time in Slurm's relative time format
+        def self.relative_time(time, now: Time.now)
+          offset = (time.to_time - now).round
+          if offset.zero?
+            "now"
+          elsif offset.positive?
+            "now+#{offset}"
+          else
+            "now#{offset}"
+          end
         end
 
         # Object used for simplified communication with a Slurm batch server
         # @api private
         class Batch
+          include Parsing
+
           UNIT_SEPARATOR = "\x1F"
           RECORD_SEPARATOR = "\x1E"
+
+          # Format Slurm uses to print timestamps (set through SLURM_TIME_FORMAT).
+          # Includes the UTC offset so times are unambiguous when the cluster and
+          # the OnDemand host run in different timezones.
+          TIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+
+          # Commands that don't get SLURM_TIME_FORMAT because their environment
+          # is propagated to the job (e.g. sbatch --export=ALL)
+          NO_TIME_FORMAT_COMMANDS = ["sbatch", "salloc", "srun"].freeze
 
           # The cluster of the Slurm batch server
           # @example CHPC's kingspeak cluster
@@ -84,6 +117,11 @@ module OodCore
           # @return [Bool]; true if empty
           attr_reader :strict_host_checking
 
+          # The ID of the cluster.
+          # @example oakley
+          # @return [String]; The ID of the cluster.
+          attr_reader :id
+
           # The root exception class that all Slurm-specific exceptions inherit
           # from
           class Error < StandardError; end
@@ -97,29 +135,38 @@ module OodCore
           # @param bin_overrides [#to_h] a hash of bin ovverides to be used in job
           # @param submit_host [#to_s] Submits the job on a login node via ssh
           # @param strict_host_checking [Bool] Whether to use strict host checking when ssh to submit_host
-          def initialize(cluster: nil, bin: nil, conf: nil, bin_overrides: {}, submit_host: "", strict_host_checking: true)
+          def initialize(cluster: nil, bin: nil, conf: nil, bin_overrides: {}, submit_host: "", strict_host_checking: true, id: 'unknown')
             @cluster              = cluster && cluster.to_s
             @conf                 = conf    && Pathname.new(conf.to_s)
             @bin                  = Pathname.new(bin.to_s)
             @bin_overrides        = bin_overrides
             @submit_host          = submit_host.to_s
             @strict_host_checking = strict_host_checking
+            @id                   = id.to_s
           end
 
           # Get a ClusterInfo object containing information about the given cluster
           # @return [ClusterInfo] object containing cluster details
           def get_cluster_info
-            node_cpu_info = call("sinfo", "-aho %A/%D/%C").strip.split('/')
-            gres_length = call("sinfo", "-o %G").lines.map(&:strip).map(&:length).max + 2
-            gres_lines = call("sinfo", "-ahNO ,nodehost,gres:#{gres_length},gresused:#{gres_length}")
-                         .lines.uniq.map(&:split)
-            ClusterInfo.new(active_nodes: node_cpu_info[0].to_i,
-                            total_nodes: node_cpu_info[2].to_i,
-                            active_processors: node_cpu_info[3].to_i,
-                            total_processors: node_cpu_info[6].to_i,
-                            active_gpus: gres_lines.sum { |line| Slurm.gpus_from_gres(line[2]) },
-                            total_gpus: gres_lines.sum { |line| Slurm.gpus_from_gres(line[1]) }
+            node_cpu_info = call("sinfo", "-aho %F/%C").strip.split('/').map(&:to_i)
+            gres_lines = call("sinfo", "-ahNO", "nodehost:100,gres:512,gresused:512,statelong")
+                         .lines.uniq.reject { |line| line.match?(/maint|drain|down/i) }.map(&:split)
+
+            node_info = sinfo_headers.zip(node_cpu_info).to_h
+            ClusterInfo.new(active_nodes: node_info['nodes_allocated'],
+                            total_nodes: node_info['nodes_total'],
+                            active_processors: node_info['cpus_allocated'],
+                            total_processors: node_info['cpus_total'],
+                            active_gpus: gres_lines.sum { |line| gpus_from_gres(line[2]) },
+                            total_gpus: gres_lines.sum { |line| gpus_from_gres(line[1]) }
             )
+          end
+
+          def sinfo_headers
+            [
+              'nodes_allocated', 'nodes_idle', 'nodes_other', 'nodes_total',
+              'cpus_allocated', 'cpus_idle', 'cpus_other', 'cpus_total'
+            ]
           end
 
           # Get a list of hashes detailing each of the jobs on the batch server
@@ -154,7 +201,7 @@ module OodCore
               advance_past_squeue_header!(output)
 
               jobs = []
-              output.each_line(RECORD_SEPARATOR) do |line|
+              output.each_line do |line|
                 # TODO: once you can do performance metrics you can test zip against some other tools
                 # or just small optimizations
                 # for example, fields is ALREADY A HASH and we are setting the VALUES to
@@ -170,7 +217,7 @@ module OodCore
                 #
                 # assuming keys and values are same length! if not we have an error!
                 line = line.encode('UTF-8', invalid: :replace, undef: :replace)
-                values = line.chomp(RECORD_SEPARATOR).strip.split(UNIT_SEPARATOR)
+                values = line.chomp("\n").split(UNIT_SEPARATOR)
                 jobs << Hash[fields.keys.zip(values)] unless values.empty?
               end
               jobs
@@ -182,22 +229,30 @@ module OodCore
 
           def accounts
             user = Etc.getlogin
-            args = ['-nP', 'show', 'users', 'withassoc', 'format=account,cluster,partition,qos', 'where', "user=#{user}"]
+            args = [ 
+                    '-nP', 'show', 'users', 'withassoc', 'format=account,qos', 
+                    'where', "user=#{user}", "cluster=#{id}"
+                   ]
 
-            [].tap do |accts|
+            [].tap do |associations|
               call('sacctmgr', *args).each_line do |line|
-                acct, cluster, queue, qos = line.split('|')
+                acct, qos = line.split('|')
                 next if acct.nil? || acct.chomp.empty?
 
-                args = {
+                associations << {
                   name: acct,
                   qos: qos.to_s.chomp.split(','),
-                  cluster: cluster,
-                  queue: queue.to_s.empty? ? nil : queue
+                  cluster: id
                 }
-                info = OodCore::Job::AccountInfo.new(**args) unless acct.nil?
-                accts << info unless acct.nil?
               end
+            end.group_by do |x|
+              [x[:name], x[:cluster]]
+            end.map do |(name, cluster), assocs|
+              OodCore::Job::AccountInfo.new(
+                name: name,
+                cluster: cluster,
+                qos: (assocs.flat_map { |x| x[:qos] }).uniq,
+              )
             end
           end
 
@@ -219,7 +274,7 @@ module OodCore
           #TODO: write some barebones test for this? like 2 options and id or no id
           def squeue_args(id: "", owner: nil, options: [])
             args  = ["--all", "--states=all", "--noconvert"]
-            args.concat ["-o", "#{RECORD_SEPARATOR}#{options.join(UNIT_SEPARATOR)}"]
+            args.concat ["-O", options.push(nil).join(":#{UNIT_SEPARATOR},")]
             args.concat ["-u", owner.to_s] unless owner.to_s.empty?
             args.concat ["-j", id.to_s] unless id.to_s.empty?
             args
@@ -271,55 +326,56 @@ module OodCore
           # Note that the order of these fields is important
           def all_squeue_fields
             {
-              account: "%a",
-              job_id: "%A",
-              exec_host: "%B",
-              min_cpus: "%c",
-              cpus: "%C",
-              min_tmp_disk: "%d",
-              nodes: "%D",
-              end_time: "%e",
-              dependency: "%E",
-              features: "%f",
-              array_job_id: "%F",
-              group_name: "%g",
-              group_id: "%G",
-              over_subscribe: "%h",
-              sockets_per_node: "%H",
-              array_job_task_id: "%i",
-              cores_per_socket: "%I",
-              job_name: "%j",
-              threads_per_core: "%J",
-              comment: "%k",
-              array_task_id: "%K",
-              time_limit: "%l",
-              time_left: "%L",
-              min_memory: "%m",
-              time_used: "%M",
-              req_node: "%n",
-              node_list: "%N",
-              command: "%o",
-              contiguous: "%O",
-              qos: "%q",
-              partition: "%P",
-              priority: "%Q",
-              reason: "%r",
-              start_time: "%S",
-              state_compact: "%t",
-              state: "%T",
-              user: "%u",
-              user_id: "%U",
-              reservation: "%v",
-              submit_time: "%V",
-              wckey: "%w",
-              licenses: "%W",
-              excluded_nodes: "%x",
-              core_specialization: "%X",
-              nice: "%y",
-              scheduled_nodes: "%Y",
-              sockets_cores_threads: "%z",
-              work_dir: "%Z",
-              gres: "%b",  # must come at the end to fix a bug with Slurm 18
+              account: 'Account',
+              job_id: 'JobID',
+              exec_host: 'BatchHost',
+              min_cpus: 'MinCpus',
+              cpus: 'NumCPUs',
+              min_tmp_disk: 'MinTmpDisk',
+              nodes: 'NumNodes',
+              end_time: 'EndTime',
+              dependency: 'Dependency',
+              features: 'Feature',
+              array_job_id: 'ArrayJobID',
+              group_name: 'GroupName',
+              group_id: 'GroupID',
+              over_subscribe: 'OverSubscribe',
+              sockets_per_node: 'Sockets',
+              array_job_task_id: 'JobArrayID',
+              cores_per_socket: 'Cores',
+              job_name: 'Name',
+              threads_per_core: 'Threads',
+              comment: 'Comment',
+              array_task_id: 'ArrayTaskID',
+              time_limit: 'TimeLimit',
+              time_left: 'TimeLeft',
+              min_memory: 'MinMemory',
+              time_used: 'TimeUsed',
+              req_node: 'ReqNodes',
+              node_list: 'NodeList',
+              command: 'Command',
+              contiguous: 'Contiguous',
+              qos: 'QOS',
+              partition: 'Partition',
+              priority: 'PriorityLong',
+              reason: 'Reason',
+              start_time: 'StartTime',
+              state_compact: 'StateCompact',
+              state: 'State',
+              user: 'UserName',
+              user_id: 'UserID',
+              reservation: 'Reservation',
+              submit_time: 'SubmitTime',
+              wckey: 'WCKey',
+              licenses: 'Licenses',
+              excluded_nodes: 'ExcNodes',
+              core_specialization: 'CoreSpec',
+              nice: 'Nice',
+              scheduled_nodes: 'SchedNodes',
+              sockets_cores_threads: 'SCT',
+              work_dir: 'WorkDir',
+              tres_alloc: 'tres-alloc',
+              gres: 'tres-per-node',  # must come at the end to fix a bug with Slurm 18
             }
           end
 
@@ -359,7 +415,9 @@ module OodCore
               # Termination time of the job.
               end: 'End',
               # Trackable resources. These are the minimum resource counts requested by the job/step at submission time.
-              gres: 'ReqTRES'
+              gres: 'ReqTRES',
+              # Trackable resources actually allocated to the job/step.
+              tres_alloc: 'AllocTRES'
             }
           end
 
@@ -408,8 +466,8 @@ module OodCore
             args.concat ['-o', fields.values.join(',')] # Required data
             args.concat ['--state', states.join(',')] unless states.empty? # Filter by these states
             args.concat ['-j', job_ids.join(',')] unless job_ids.empty? # Filter by these job ids
-            args.concat ['-S', from] if from # Filter from This date
-            args.concat ['-E', to] if to # Filter until this date
+            args.concat ['-S', sacct_time(from)] if from # Filter from This date
+            args.concat ['-E', sacct_time(to)] if to # Filter until this date
 
             jobs_info = []
             StringIO.open(call('sacct', *args)) do |output|
@@ -423,6 +481,13 @@ module OodCore
           end
 
           private
+            # Times are converted to a relative time so they are timezone
+            # independent. Strings are passed through as is and are interpreted
+            # by Slurm in the cluster's timezone.
+            def sacct_time(time)
+              time.is_a?(Time) || time.is_a?(DateTime) ? Slurm.relative_time(time) : time.to_s
+            end
+
             def str_to_queue_info(line)
               hsh = line.split(' ').map do |token|
                 m = token.match(/^(?<key>\w+)=(?<value>.+)$/)
@@ -430,7 +495,6 @@ module OodCore
               end.to_h.symbolize_keys
 
               hsh[:name] = hsh[:PartitionName]
-              hsh[:qos] =  hsh[:QoS].to_s == 'N/A' ? [] : hsh[:QoS].to_s.split(',')
               hsh[:allow_accounts] = if hsh[:AllowAccounts].nil? || hsh[:AllowAccounts].to_s == 'ALL'
                                        nil
                                      else
@@ -443,45 +507,62 @@ module OodCore
                                       hsh[:DenyAccounts].nil? ? [] : hsh[:DenyAccounts].to_s.split(',')
                                     end
 
+              hsh[:allow_qos] = if hsh[:AllowQos].nil? || hsh[:AllowQos].to_s == 'ALL'
+                                  []
+                                else
+                                  hsh[:AllowQos].to_s.split(',')
+                                end
+              hsh[:deny_qos] = if !hsh[:allow_qos].empty?
+                                 [] # manpage says that AllowQos negates DenyQos
+                               else
+                                 hsh[:DenyQos].nil? ? [] : hsh[:DenyQos].to_s.split(',')
+                               end
               hsh[:tres] = case hsh[:TRES]
                            when nil, '(null)', ''
                              {}
                            else
                              hsh[:TRES].to_s.split(',').map { |str| str.split('=') }.to_h
                            end
+
+              hsh[:max_cpus] = parse_max(hsh[:MaxCPUsPerNode])
+              hsh[:max_nodes] = parse_max(hsh[:MaxNodes])
+              hsh[:min_nodes] = parse_max(hsh[:MinNodes])
+              hsh[:max_time] = duration_in_seconds(hsh[:MaxTime])
+
               OodCore::Job::QueueInfo.new(**hsh)
             end
 
             # Modify the StringIO instance by advancing past the squeue header
             #
-            # The first two "records" should always be discarded. Consider the
-            # following squeue with -M output (invisible characters shown):
+            # Discard everything before the end of the first formatted line (the header). 
+            # Consider the following squeue with -M output (invisible characters shown):
             #
             #   CLUSTER: slurm_cluster_name\n
-            #   \x1EJOBID\x1F\x1FSTATE\n
-            #   \x1E1\x1F\x1FR\n
-            #   \x1E2\x1F\x1FPD\n
+            #   JOBID\x1FSTATE\x1F\n
+            #   1\x1FR\x1F\n
+            #   2\x1FPD\x1F\n
             #
-            # Splitting on the record separator first gives the Cluster header,
-            # and then the regular header. If -M or --cluster is not specified
-            # the effect is the same because the record separator is at the
-            # start of the format string, so the first "record" would simply be
-            # empty.
+            # Whether the cluster line is present or not doesn't matter, since it doesn't
+            # get the unit separator applied. So this always takes us to the end of the 
+            # header, or the start of the job data
             def advance_past_squeue_header!(squeue_output)
-              2.times { squeue_output.gets(RECORD_SEPARATOR) }
+              squeue_output.gets("#{UNIT_SEPARATOR}\n")
             end
 
             # Call a forked Slurm command for a given cluster
             def call(cmd, *args, env: {}, stdin: "")
+              # Don't set the time format for job submission commands, so it doesn't leak into job environments.
+              time_env = NO_TIME_FORMAT_COMMANDS.include?(cmd.to_s) ? {} : { "SLURM_TIME_FORMAT" => TIME_FORMAT }
               cmd = OodCore::Job::Adapters::Helper.bin_path(cmd, bin, bin_overrides)
 
               args  = args.map(&:to_s)
               args.concat ["-M", cluster] if cluster && !cmd.to_s.end_with?('sacctmgr')
 
-              env = env.to_h
+              env = time_env.merge(env.to_h)
               env["SLURM_CONF"] = conf.to_s if conf
 
-              cmd, args = OodCore::Job::Adapters::Helper.ssh_wrap(submit_host, cmd, args, strict_host_checking)
+              remote_env = env.slice(*time_env.keys)
+              cmd, args = OodCore::Job::Adapters::Helper.ssh_wrap(submit_host, cmd, args, strict_host_checking, remote_env)
               o, e, s = Open3.capture3(env, cmd, *(args.map(&:to_s)), stdin_data: stdin.to_s)
               s.success? ? interpret_and_raise(o, e) : raise(Error, e)
             end
@@ -517,6 +598,12 @@ module OodCore
                 }.fetch(a, a)
               }.flatten
             end
+
+          def parse_max(max)
+            return nil if max.nil? || max.to_s == 'UNLIMITED'
+
+            max.to_i
+          end
         end
 
         # Mapping of state codes for Slurm
@@ -539,7 +626,7 @@ module OodCore
           'OOM' => :completed, # OUT_OF_MEMORY
 
           'BOOT_FAIL'     => :completed,
-          'CANCELED'      => :completed,
+          'CANCELLED'     => :completed,
           'COMPLETED'     => :completed,
           'DEADLINE'      => :completed,
           'FAILED'        => :completed,
@@ -580,6 +667,7 @@ module OodCore
         #   job
         # @see Adapter#submit
         def submit(script, after: [], afterok: [], afternotok: [], afterany: [])
+          validate_native(script, Array)
           after      = Array(after).map(&:to_s)
           afterok    = Array(afterok).map(&:to_s)
           afternotok = Array(afternotok).map(&:to_s)
@@ -608,13 +696,18 @@ module OodCore
           args.concat ["--reservation", script.reservation_id] unless script.reservation_id.nil?
           args.concat ["-p", script.queue_name] unless script.queue_name.nil?
           args.concat ["--priority", script.priority] unless script.priority.nil?
-          args.concat ["--begin", script.start_time.localtime.strftime("%C%y-%m-%dT%H:%M:%S")] unless script.start_time.nil?
+          unless script.start_time.nil?
+            # sbatch only accepts a positive offset from now
+            now = Time.now
+            args.concat ["--begin", self.class.relative_time([script.start_time, now].max, now: now)]
+          end
           args.concat ["-A", script.accounting_id] unless script.accounting_id.nil?
           args.concat ["-t", seconds_to_duration(script.wall_time)] unless script.wall_time.nil?
           args.concat ['-a', script.job_array_request] unless script.job_array_request.nil?
           args.concat ['--qos', script.qos] unless script.qos.nil?
           args.concat ['--gpus-per-node', script.gpus_per_node] unless script.gpus_per_node.nil?
           args.concat ['-n', script.cores] unless script.cores.nil?
+          args.concat ['--mem', script.memory] unless script.memory.nil?
           # ignore nodes, don't know how to do this for slurm
 
           # Set dependencies
@@ -676,9 +769,11 @@ module OodCore
         # job_ids [Array<#to_s>] optional list of job ids to filter the results.
         # states [Array<#to_s>] optional list of job state codes.
         # Selects jobs based on their state during the time period given.
-        # from [#to_s] optional date string to filter jobs in any state after the specified time.
+        # from [Time, DateTime, #to_s] optional time to filter jobs in any state after the specified time.
         # If states are provided, filter jobs in these states after this period
-        # to [#to_s] optional date string to filter jobs in any state before the specified time.
+        # to [Time, DateTime, #to_s] optional time to filter jobs in any state before the specified time.
+        # Pass Time or DateTime objects to be timezone independent; strings are
+        # passed to sacct as is and interpreted in the cluster's timezone.
         # If states are provided, filter jobs in these states before this period.
         # show_steps [#Boolean] optional boolean to filter job steps from the results.
         #
@@ -704,7 +799,8 @@ module OodCore
               submission_time: parse_time(v[:submit_time]),
               dispatch_time: parse_time(v[:start_time]),
               native: v,
-              gpus: self.class.gpus_from_gres(v[:gres])
+              gpus: gpus_from_tres(v[:tres_alloc]),
+              total_memory: memory_from_tres(v[:tres_alloc])
             )
           end
         end
@@ -819,6 +915,12 @@ module OodCore
           '#SBATCH'
         end
 
+        # Whether the adapter supports job dependencies
+        # @return [Boolean] - true
+        def supports_job_dependencies?
+          true
+        end
+
         def queues
           @slurm.queues
         end
@@ -828,24 +930,16 @@ module OodCore
         end
 
         private
-          # Convert duration to seconds
-          def duration_in_seconds(time)
-            return 0 if time.nil?
-            time, days = time.split("-").reverse
-            days.to_i * 24 * 3600 +
-              time.split(':').map { |v| v.to_i }.inject(0) { |total, v| total * 60 + v }
-          end
-
           # Convert seconds to duration
           def seconds_to_duration(time)
             "%02d:%02d:%02d" % [time/3600, time/60%60, time%60]
           end
 
-        # Parse date time string ignoring unknown values returned by Slurm
+        # safely parse date time string, return nil when there are errors.
         def parse_time(date_time)
-          return nil if date_time.empty? || %w[N/A NONE UNKNOWN].include?(date_time.to_s.upcase)
-
-          Time.parse(date_time)
+          Time.parse(date_time.to_s)
+        rescue StandardError
+          nil
         end
 
           # Convert host list string to individual nodes
@@ -872,7 +966,7 @@ module OodCore
 
           # Determine state from Slurm state code
           def get_state(st)
-            STATE_MAP.fetch(st, :undetermined)
+            STATE_MAP.fetch(st.split.first, :undetermined)
           end
 
           # Parse hash describing Slurm job status
@@ -899,10 +993,12 @@ module OodCore
               wallclock_time: duration_in_seconds(v[:time_used]),
               wallclock_limit: duration_in_seconds(v[:time_limit]),
               cpu_time: nil,
-              submission_time: v[:submit_time] ? Time.parse(v[:submit_time]) : nil,
-              dispatch_time: (v[:start_time].nil? || v[:start_time] == "N/A") ? nil : Time.parse(v[:start_time]),
+              submission_time: parse_time(v[:submit_time]),
+              dispatch_time: parse_time(v[:start_time]),
               native: v,
-              gpus: self.class.gpus_from_gres(v[:gres])
+              total_memory: memory_from_tres(v[:tres_alloc]),
+              gpu_types: gpu_types_from_tres(v[:tres_alloc]),
+              gpus: gpus_from_tres(v[:tres_alloc])
             )
           end
 

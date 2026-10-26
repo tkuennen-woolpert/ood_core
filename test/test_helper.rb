@@ -1,3 +1,4 @@
+require 'minitest/autorun'
 require 'ood_core'
 require 'mocha/minitest'
 
@@ -45,5 +46,9 @@ module TestHelper
 
   def exit_success
     OpenStruct.new(:success? => true, :exitstatus => 0)
+  end
+
+  def stub_etc
+    Etc.stubs(:getlogin).returns('me')
   end
 end

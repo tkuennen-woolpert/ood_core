@@ -56,8 +56,8 @@ module OodCore
         # @option context [#to_s] :extra_args ("") any extra arguments used
         #   when initializing the vnc server process (not set if blank or
         #   `:vnc_args` is set) (assumes you don't modify `:before_script`)
-        # @option context [#to_s] :vnc_clean ("...") script used to clean up
-        #   any active vnc sessions (assumes you don't modify `:before_script`
+        # @option context [#to_s] :vnc_clean ("...") script used to stop
+        #   this job's vnc session (assumes you don't modify `:before_script`
         #   or `:clean_script`)
         # @option context [#to_s] :container_path ("vnc_container.sif") the path
         #   to the container with VNC
@@ -103,6 +103,28 @@ module OodCore
               echo "Starting instance..."
               #{container_command} instance start #{container_start_args} #{container_path} #{@instance_name}
 
+              # This template needs TurboVNC in the container; say so plainly when it isn't there
+              if ! #{container_command} exec instance://#{@instance_name} sh -c 'command -v vncserver' >/dev/null 2>&1; then
+                echo "ERROR: vncserver isn't in PATH in the container (#{container_path})."
+                echo "VNC apps need TurboVNC (https://www.turbovnc.org) installed in the container."
+                clean_up 1
+              fi
+
+              # TigerVNC's vncserver takes different options and prints different
+              # output, so it can't stand in for TurboVNC
+              vnc_is_tigervnc () {
+                echo "${VNC_OUT}" | grep -qiE 'tigervnc|replaced by a systemd unit'
+              }
+
+              vnc_start_failed () {
+                echo "ERROR: Could not start the VNC server."
+                if vnc_is_tigervnc; then
+                  echo "The vncserver in the container (#{container_path}) is TigerVNC, but VNC apps"
+                  echo "need TurboVNC (https://www.turbovnc.org) installed in the container."
+                fi
+                clean_up 1
+              }
+
               # Setup one-time use passwords and initialize the VNC password
               function change_passwd () {
                 echo "Setting VNC password..."
@@ -137,6 +159,11 @@ module OodCore
                 # should kill it and try again
                 kill -0 ${VNC_PID} 2>/dev/null && [[ "${VNC_OUT}" =~ "Fatal server error" ]] && kill -TERM ${VNC_PID}
 
+                # Trying again won't help if this is TigerVNC
+                if ! kill -0 ${VNC_PID} 2>/dev/null && vnc_is_tigervnc; then
+                  break
+                fi
+
                 # Check that Xvnc process is running, if not assume it died and
                 # wait some random period of time before restarting
                 kill -0 ${VNC_PID} 2>/dev/null || sleep 0.$(random_number 1 9)s
@@ -146,7 +173,7 @@ module OodCore
               done
 
               # If we fail to start it after so many tries, then just give up
-              kill -0 ${VNC_PID} 2>/dev/null || clean_up 1
+              kill -0 ${VNC_PID} 2>/dev/null || vnc_start_failed
 
               # Parse output for ports used
               display=$(echo "${VNC_OUT}" | awk -F':' '/^Desktop/{print $NF}')
@@ -191,14 +218,13 @@ module OodCore
             EOT
           end
 
-          # Clean up the running VNC server and any other stale VNC servers
+          # Stop the VNC server this job started, then its container
           def clean_script
             <<-EOT.gsub(/^ {14}/, "")
               #{super}
               module load #{container_module}
 
               #{vnc_clean}
-              [[ -n ${display} ]] && vncserver -kill :${display}
               #{container_command} instance stop #{@instance_name}
             EOT
           end
@@ -247,10 +273,15 @@ module OodCore
             end.to_s
           end
 
-          # Clean up any stale VNC sessions
+          # Stop this job's VNC server. Kill by display rather than walking
+          # `vncserver -list`: the PIDs it reports are from inside the
+          # instance's PID namespace, so `kill -0` against them on the host
+          # can't tell live sessions from dead ones. `display` is unset until
+          # the server has started, so this does nothing in the startup loop
+          # or after a failed start.
           def vnc_clean
             context.fetch(:vnc_clean) do
-              %(#{container_command} exec instance://#{@instance_name} vncserver -list | awk '/^:/{system("kill -0 "$2" 2>/dev/null || #{container_command} exec instance://#{@instance_name} vncserver -kill "$1)}')
+              %([[ -n ${display} ]] && #{container_command} exec instance://#{@instance_name} vncserver -kill :${display})
             end.to_s
           end
       end

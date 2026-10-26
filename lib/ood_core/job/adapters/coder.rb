@@ -1,24 +1,42 @@
 require "ood_core/refinements/hash_extensions"
 require "ood_core/refinements/array_extensions"
 require 'net/http'
-require 'json'
 require 'etc'
+
 
 module OodCore
   module Job
     class Factory
       using Refinements::HashExtensions
 
+      require "ood_core/job/adapters/coder/openstack_credentials"
+      require "ood_core/job/adapters/coder/none_credentials"
+
       def self.build_coder(config)
-        batch = Adapters::Coder::Batch.new(config.to_h.symbolize_keys)
+        config = config.to_h.symbolize_keys
+        credentials = build_credentials(config[:auth] || {})
+        batch = Adapters::Coder::Batch.new(config, credentials)
         Adapters::Coder.new(batch)
+      end
+
+      def self.build_credentials(auth)
+        begin
+          auth_type = auth.to_h.fetch('cloud', 'none')
+
+          class_name = auth_type.split(/[_-]/).map {|s| s.gsub(/\b\w/, &:upcase) }.join
+
+          klass = Object.const_get("#{class_name}Credentials")
+          klass.new(**auth.to_h.symbolize_keys)
+        rescue NameError
+          raise(ArgumentError, "Unsupported credentials for cloud type: #{auth_type}")
+        end
       end
     end
 
     module Adapters
       attr_reader :host, :token
 
-      # The adapter class for Kubernetes.
+      # The adapter class for Coder.
       class Coder < Adapter
 
         using Refinements::ArrayExtensions
@@ -54,6 +72,7 @@ module OodCore
         # @return [String] the job id returned after successfully submitting a job
         def submit(script, after: [], afterok: [], afternotok: [], afterany: [])
           raise ArgumentError, 'Must specify the script' if script.nil?
+          validate_native(script, Hash, required: true)
           batch.submit(script)
         rescue Batch::Error => e
           raise JobAdapterError, e.message
@@ -71,10 +90,7 @@ module OodCore
         #   adapters can get by without populating the entire Info object
         # @return [Array<Info>] information describing submitted jobs
         def info_all(attrs: nil)
-        # TODO - implement info all for namespaces?
-          batch.method_missing(attrs: attrs)
-        rescue Batch::Error => e
-          raise JobAdapterError, e.message
+          []
         end
     
         # Whether the adapter supports job arrays

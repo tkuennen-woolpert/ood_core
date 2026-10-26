@@ -24,6 +24,13 @@ module OodCore
         # @option context [#to_s] :websockify_cmd
         #   ("${WEBSOCKIFY_CMD:-/opt/websockify/run}") the path to the
         #   websockify script (assumes you don't modify `:after_script`)
+        # @option context [#to_s] :vncserver_cmd
+        #   ("${VNCSERVER_CMD:-vncserver}") the vncserver command, e.g. a full
+        #   path like /opt/TurboVNC/bin/vncserver so a user's PATH can't swap
+        #   in a different one
+        # @option context [#to_s] :vncpasswd_cmd
+        #   ("${VNCPASSWD_CMD:-vncpasswd}") the vncpasswd command, e.g.
+        #   /opt/TurboVNC/bin/vncpasswd
         # @option context [#to_s] :websockify_heartbeat_seconds
         #   ("${WEBSOCKIFY_HEARTBEAT_SECONDS:-30}") the websockify heartbeat
         #   duration in seconds. (assumes you don't modify `:after_script`)
@@ -53,8 +60,8 @@ module OodCore
         # @option context [#to_s] :extra_args ("") any extra arguments used
         #   when initializing the vnc server process (not set if blank or
         #   `:vnc_args` is set) (assumes you don't modify `:before_script`)
-        # @option context [#to_s] :vnc_clean ("...") script used to clean up
-        #   any active vnc sessions (assumes you don't modify `:before_script`
+        # @option context [#to_s] :vnc_clean ("...") script used to stop
+        #   this job's vnc session (assumes you don't modify `:before_script`
         #   or `:clean_script`)
         # @see Template
         def initialize(context = {})
@@ -71,6 +78,31 @@ module OodCore
           # the connection information
           def before_script
             <<-EOT.gsub(/^ {14}/, "")
+              # This template needs TurboVNC; say so plainly when it isn't there
+              # (checks vncserver_cmd, so a command pinned outside PATH still counts)
+              if ! command -v #{vncserver_cmd} >/dev/null 2>&1; then
+                echo "ERROR: VNC server command not found: #{vncserver_cmd}"
+                echo "VNC apps need TurboVNC (https://www.turbovnc.org). Install it on this node and either"
+                echo "put its bin directory (usually /opt/TurboVNC/bin) in PATH or set vncserver_cmd to its full path."
+                clean_up 1
+              fi
+
+              # TigerVNC's vncserver takes different options and prints different
+              # output, so it can't stand in for TurboVNC
+              vnc_is_tigervnc () {
+                echo "${VNC_OUT}" | grep -qiE 'tigervnc|replaced by a systemd unit'
+              }
+
+              vnc_start_failed () {
+                echo "ERROR: Could not start the VNC server."
+                if vnc_is_tigervnc; then
+                  echo "The VNC server in use ($(command -v #{vncserver_cmd})) is TigerVNC, but VNC apps need"
+                  echo "TurboVNC (https://www.turbovnc.org). Install it on this node and either put its bin"
+                  echo "directory (usually /opt/TurboVNC/bin) first in PATH or set vncserver_cmd to its full path."
+                fi
+                clean_up 1
+              }
+
               # Setup one-time use passwords and initialize the VNC password
               function change_passwd () {
                 echo "Setting VNC password..."
@@ -78,7 +110,7 @@ module OodCore
                 spassword=${spassword:-$(create_passwd "#{password_size}")}
                 (
                   umask 077
-                  echo -ne "${password}\\n${spassword}" | vncpasswd -f > "#{vnc_passwd}"
+                  echo -ne "${password}\\n${spassword}" | #{vncpasswd_cmd} -f > "#{vnc_passwd}"
                 )
               }
               change_passwd
@@ -90,18 +122,23 @@ module OodCore
                 #{vnc_clean}
 
                 # for turbovnc 3.0 compatability.
-                if timeout 2 vncserver --help 2>&1 | grep 'nohttpd' >/dev/null 2>&1; then
+                if timeout 2 #{vncserver_cmd} --help 2>&1 | grep 'nohttpd' >/dev/null 2>&1; then
                   HTTPD_OPT='-nohttpd'
                 fi
 
                 # Attempt to start VNC server
-                VNC_OUT=$(vncserver -log "#{vnc_log}" -rfbauth "#{vnc_passwd}" $HTTPD_OPT -noxstartup #{vnc_args} 2>&1)
+                VNC_OUT=$(#{vncserver_cmd} -log "#{vnc_log}" -rfbauth "#{vnc_passwd}" $HTTPD_OPT -noxstartup #{vnc_args} 2>&1)
                 VNC_PID=$(pgrep -s 0 Xvnc) # the script above will daemonize the Xvnc process
                 echo "${VNC_OUT}"
 
                 # Sometimes Xvnc hangs if it fails to find working disaply, we
                 # should kill it and try again
                 kill -0 ${VNC_PID} 2>/dev/null && [[ "${VNC_OUT}" =~ "Fatal server error" ]] && kill -TERM ${VNC_PID}
+
+                # Trying again won't help if this is TigerVNC
+                if ! kill -0 ${VNC_PID} 2>/dev/null && vnc_is_tigervnc; then
+                  break
+                fi
 
                 # Check that Xvnc process is running, if not assume it died and
                 # wait some random period of time before restarting
@@ -112,7 +149,7 @@ module OodCore
               done
 
               # If we fail to start it after so many tries, then just give up
-              kill -0 ${VNC_PID} 2>/dev/null || clean_up 1
+              kill -0 ${VNC_PID} 2>/dev/null || vnc_start_failed
 
               # Parse output for ports used
               display=$(echo "${VNC_OUT}" | awk -F':' '/^Desktop/{print $NF}')
@@ -193,13 +230,12 @@ module OodCore
             EOT
           end
 
-          # Clean up the running VNC server and any other stale VNC servers
+          # Stop the VNC server this job started
           def clean_script
             <<-EOT.gsub(/^ {14}/, "")
               #{super}
 
               #{vnc_clean}
-              [[ -n ${display} ]] && vncserver -kill :${display}
             EOT
           end
 
@@ -211,6 +247,16 @@ module OodCore
           # Password file for VNC server
           def vnc_passwd
             context.fetch(:vnc_passwd, "vnc.passwd").to_s
+          end
+
+          # The vncserver command
+          def vncserver_cmd
+            context.fetch(:vncserver_cmd, "${VNCSERVER_CMD:-vncserver}").to_s
+          end
+
+          # The vncpasswd command
+          def vncpasswd_cmd
+            context.fetch(:vncpasswd_cmd, "${VNCPASSWD_CMD:-vncpasswd}").to_s
           end
 
           # Arguments sent to `vncserver` command
@@ -235,10 +281,13 @@ module OodCore
             end.to_s
           end
 
-          # Clean up any stale VNC sessions
+          # Stop this job's VNC server. Kill by display rather than walking
+          # `vncserver -list`, which also lists the user's other sessions on
+          # this node. `display` is unset until the server has started, so
+          # this does nothing in the startup loop or after a failed start.
           def vnc_clean
             context.fetch(:vnc_clean) do
-              %(vncserver -list | awk '/^:/{system("kill -0 "$2" 2>/dev/null || vncserver -kill "$1)}')
+              %([[ -n ${display} ]] && #{vncserver_cmd} -kill :${display})
             end.to_s
           end
       end

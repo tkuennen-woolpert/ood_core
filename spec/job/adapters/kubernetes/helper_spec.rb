@@ -37,6 +37,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
     dispatch_time: 1587060509,
     submission_time: 1587060496,
     wallclock_time: 154407,
+    wallclock_limit: nil,
     ood_connection_info: { host: "10.20.0.40" },
     procs: "1"
   }}
@@ -49,7 +50,8 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
     dispatch_time: nil,
     submission_time: 1626897251,
     wallclock_time: nil,
-    ood_connection_info: { host: "10.20.0.40" },
+    wallclock_limit: 3600,
+    ood_connection_info: { host: "192.148.247.170" },
     procs: "1"
   }}
 
@@ -61,6 +63,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
     dispatch_time: nil,
     submission_time: 1587069112,
     wallclock_time: nil,
+    wallclock_limit: nil,
     ood_connection_info: { host: "10.20.0.40" },
     procs: nil
   }}
@@ -73,6 +76,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
     dispatch_time: nil,
     submission_time: 1626112960,
     wallclock_time: nil,
+    wallclock_limit: 3600,
     ood_connection_info: { host: "192.148.247.170" },
     procs: 1
   }}
@@ -85,6 +89,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
     dispatch_time: nil,
     submission_time: 1626113242,
     wallclock_time: nil,
+    wallclock_limit: 3600,
     ood_connection_info: { host: "192.148.247.170" },
     procs: 1
   }}
@@ -97,6 +102,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
     dispatch_time: 1587506633,
     submission_time: 1587506632,
     wallclock_time: 300,
+    wallclock_limit: nil,
     ood_connection_info: { host: "10.20.0.40" },
     procs: nil
   }}
@@ -109,6 +115,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
     dispatch_time: nil,
     submission_time: 1587580037,
     wallclock_time: nil,
+    wallclock_limit: nil,
     ood_connection_info: { host: "10.20.0.40" },
     procs: nil
   }}
@@ -121,6 +128,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
     dispatch_time: nil,
     submission_time: 1587580582,
     wallclock_time: nil,
+    wallclock_limit: nil,
     ood_connection_info: { host: nil },
     procs: "1"
   }}
@@ -133,6 +141,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
     dispatch_time: 1607638123,
     submission_time: 1607637118,
     wallclock_time: 76885,
+    wallclock_limit: 10800,
     ood_connection_info: { host: "192.148.247.227" },
     procs: "1"
   }}
@@ -159,7 +168,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         secret_json: nil
       )
 
-      expect(info).to eq(K8sJobInfo.new(**single_running_pod_hash))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**single_running_pod_hash))
       expect(info.status.running?).to be true
     end
 
@@ -172,7 +181,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         secret_json: nil
       )
 
-      expect(info).to eq(K8sJobInfo.new(**single_running_pod_not_ready_hash))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**single_running_pod_not_ready_hash))
       expect(info.status.queued?).to be true
     end
 
@@ -185,7 +194,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         secret_json: nil
       )
 
-      expect(info).to eq(K8sJobInfo.new(**pod_with_port))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**pod_with_port))
       expect(info.status.running?).to be true
     end
 
@@ -198,7 +207,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         secret_json: single_secret
       )
 
-      expect(info).to eq(K8sJobInfo.new(**pod_with_port_and_secret))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**pod_with_port_and_secret))
       expect(info.status.running?).to be true
     end
 
@@ -211,7 +220,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         secret_json: nil
       )
 
-      expect(info).to eq(K8sJobInfo.new(**single_error_pod_hash))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**single_error_pod_hash))
       expect(info.status.suspended?).to be true
     end
 
@@ -224,7 +233,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         secret_json: nil
       )
 
-      expect(info).to eq(K8sJobInfo.new(**single_image_error_pod_hash))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**single_image_error_pod_hash))
       expect(info.status.queued?).to be true
     end
 
@@ -237,7 +246,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         secret_json: nil
       )
 
-      expect(info).to eq(K8sJobInfo.new(**single_crash_loop_pod_hash))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**single_crash_loop_pod_hash))
       expect(info.status.undetermined?).to be true
     end
 
@@ -250,7 +259,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         secret_json: nil
       )
 
-      expect(info).to eq(K8sJobInfo.new(**single_completed_pod_hash))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**single_completed_pod_hash))
       expect(info.status.completed?).to be true
     end
 
@@ -263,7 +272,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         secret_json: nil
       )
 
-      expect(info).to eq(K8sJobInfo.new(**single_queued_pod_hash))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**single_queued_pod_hash))
       expect(info.status.queued?).to be true
     end
 
@@ -277,7 +286,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         secret_json: nil
       )
 
-      expect(info).to eq(K8sJobInfo.new(**single_unscheduleable_pod_hash))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**single_unscheduleable_pod_hash))
     end
 
     it "correctly throws exception on bad data" do
@@ -289,7 +298,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
           service_json: empty_json,
           secret_json: empty_json
         )
-      }.to raise_error(Kubernetes::Helper::K8sDataError, "unable to read data correctly from json")
+      }.to raise_error(OodCore::Job::Adapters::Kubernetes::Helper::K8sDataError, "unable to read data correctly from json")
     end
 
     it "correctly deals with namespace prefixed pods" do
@@ -302,7 +311,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
         ns_prefix: 'user-'
       )
 
-      expect(info).to eq(K8sJobInfo.new(**ns_prefixed_pod_hash))
+      expect(info).to eq(OodCore::Job::Adapters::Kubernetes::K8sJobInfo.new(**ns_prefixed_pod_hash))
     end
   end
 
@@ -333,7 +342,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
 
     it "correctly parses a full container" do
       expect(helper.container_from_native(ctr_hash, default_env)).to eq(
-        Kubernetes::Resources::Container.new(
+        OodCore::Job::Adapters::Kubernetes::Resources::Container.new(
           'ruby-test-container',
           'ruby:2.5',
           port: 8080,
@@ -357,7 +366,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
       ctr_hash.delete(:port)
 
       expect(helper.container_from_native(ctr_hash, default_env)).to eq(
-        Kubernetes::Resources::Container.new(
+        OodCore::Job::Adapters::Kubernetes::Resources::Container.new(
           'ruby-test-container',
           'ruby:2.5',
           command: ['rake', 'spec'],
@@ -380,7 +389,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
       ctr_hash.delete(:command)
 
       expect(helper.container_from_native(ctr_hash, default_env)).to eq(
-        Kubernetes::Resources::Container.new(
+        OodCore::Job::Adapters::Kubernetes::Resources::Container.new(
           'ruby-test-container',
           'ruby:2.5',
           port: 8080,
@@ -403,7 +412,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
       ctr_hash.delete(:env)
 
       expect(helper.container_from_native(ctr_hash, default_env)).to eq(
-        Kubernetes::Resources::Container.new(
+        OodCore::Job::Adapters::Kubernetes::Resources::Container.new(
           'ruby-test-container',
           'ruby:2.5',
           port: 8080,
@@ -427,7 +436,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
       ctr_hash.delete(:working_dir)
 
       expect(helper.container_from_native(ctr_hash, default_env)).to eq(
-        Kubernetes::Resources::Container.new(
+        OodCore::Job::Adapters::Kubernetes::Resources::Container.new(
           'ruby-test-container',
           'ruby:2.5',
           port: 8080,
@@ -450,7 +459,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
       ctr_hash.delete(:restart_policy)
 
       expect(helper.container_from_native(ctr_hash, default_env)).to eq(
-        Kubernetes::Resources::Container.new(
+        OodCore::Job::Adapters::Kubernetes::Resources::Container.new(
           'ruby-test-container',
           'ruby:2.5',
           port: 8080,
@@ -474,7 +483,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
       ctr_hash.delete(:image_pull_secret)
 
       expect(helper.container_from_native(ctr_hash, default_env)).to eq(
-        Kubernetes::Resources::Container.new(
+        OodCore::Job::Adapters::Kubernetes::Resources::Container.new(
           'ruby-test-container',
           'ruby:2.5',
           port: 8080,
@@ -508,7 +517,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
       ctr_hash[:image_pull_secret] = nil
 
       expect(helper.container_from_native(ctr_hash, default_env)).to eq(
-        Kubernetes::Resources::Container.new(
+        OodCore::Job::Adapters::Kubernetes::Resources::Container.new(
           'ruby-test-container',
           'ruby:2.5',
           env: {
@@ -531,7 +540,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
       ctr_hash[:image_pull_secret] = nil
 
       expect(helper.container_from_native(ctr_hash, default_env)).to eq(
-        Kubernetes::Resources::Container.new(
+        OodCore::Job::Adapters::Kubernetes::Resources::Container.new(
           'ruby-test-container',
           'ruby:2.5',
           env: {
@@ -562,7 +571,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
       ctr_hash[:image_pull_secret] = nil
 
       expect(helper.container_from_native(ctr_hash, default_env)).to eq(
-        Kubernetes::Resources::Container.new(
+        OodCore::Job::Adapters::Kubernetes::Resources::Container.new(
           'ruby-test-container',
           'ruby:2.5',
           env: {
@@ -671,7 +680,7 @@ describe OodCore::Job::Adapters::Kubernetes::Helper do
 
       expect {
         helper.pod_info_from_json(empty_json)
-      }.to raise_error(Kubernetes::Helper::K8sDataError, "unable to read data correctly from json")
+      }.to raise_error(OodCore::Job::Adapters::Kubernetes::Helper::K8sDataError, "unable to read data correctly from json")
     end
 
     it "correctly deals with namespace prefixed pods" do

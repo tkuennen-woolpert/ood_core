@@ -77,6 +77,16 @@ module OodCore
       end
     end
 
+    def title
+      if !metadata.title.nil?
+        metadata.title
+      elsif id.to_s.respond_to?(:titleize)
+        id.to_s.titleize
+      else
+        id.to_s
+      end
+    end
+
     # Metadata that provides extra information about this cluster
     # @return [OpenStruct] the metadata
     def metadata
@@ -100,7 +110,7 @@ module OodCore
     # Build a job adapter from the job configuration
     # @return [Job::Adapter] the job adapter
     def job_adapter
-      Job::Factory.build(job_config)
+      Job::Factory.build(job_config.merge({ id: id }))
     end
 
     # Whether the job feature is allowed based on the ACLs

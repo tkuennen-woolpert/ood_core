@@ -74,6 +74,7 @@ module OodCore
         #   job
         # @see Adapter#submit
         def submit(script, after: [], afterok: [], afternotok: [], afterany: [])
+          validate_native(script, Array)
           # ensure dependencies are array of ids
           after      = Array(after).map(&:to_s)
           afterok    = Array(afterok).map(&:to_s)
@@ -174,6 +175,12 @@ module OodCore
           '#BSUB'
         end
 
+        # Whether the adapter supports job dependencies
+        # @return [Boolean] - true
+        def supports_job_dependencies?
+          true
+        end
+        
         private
           # Determine state from LSF state code
           def get_state(st)

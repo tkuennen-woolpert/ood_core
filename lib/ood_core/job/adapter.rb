@@ -133,6 +133,14 @@ module OodCore
         true
       end
 
+      # Whether the adapter supports job dependencies via +after+, +afterok+,
+      # +afternotok+, and +afterany+
+      # @return [Boolean] - assumes false; adapters that support dependencies
+      #   should override this
+      def supports_job_dependencies?
+        false
+      end
+      
       # Retrieve job info from the resource manager
       # @abstract Subclass is expected to implement {#info}
       # @raise [NotImplementedError] if subclass did not define {#info}
@@ -210,7 +218,8 @@ module OodCore
         ENV["OOD_JOB_NAME_ILLEGAL_CHARS"].to_s
       end
 
-      # Retrieve the accounts available to use  for the current user.
+      # Retrieve the accounts available to use for the current user.
+      # The same account might appear muiltiple times if it has access to multiple clusters.
       #
       # Subclasses that do not implement this will return empty arrays.
       # @return [Array<AccountInfo>] the accounts available to the user.
@@ -232,6 +241,45 @@ module OodCore
       # @return [Array<NodeInfo>]
       def nodes
         []
+      end
+
+      private
+
+      # Raise a JobAdapterError if script.native isn't a type this adapter can
+      # use. Otherwise the wrong type fails later, deep in the adapter, with
+      # errors like "no implicit conversion of Symbol into Integer".
+      #
+      # @param script [Script] the script being submitted
+      # @param types [Array<Class>] the classes script.native may be
+      # @param required [Boolean] whether script.native has to be set
+      # @raise [JobAdapterError] if script.native is the wrong type
+      def validate_native(script, *types, required: false)
+        native = script.native
+        adapter = self.class.name.split('::').last
+        expected = types.map { |type| native_type_name(type) }.join(' or ')
+
+        if native.nil?
+          return unless required
+
+          raise JobAdapterError, "The #{adapter} adapter needs script.native to be a #{expected}, but it is not set. Check native: in the app's submit.yml.erb."
+        end
+
+        return if types.any? { |type| native.is_a?(type) }
+
+        raise JobAdapterError, "The #{adapter} adapter needs script.native to be a #{expected}, but it is a #{native_type_name(native.class)}. Check native: in the app's submit.yml.erb."
+      end
+
+      # How a native type looks in an app's submit.yml.erb
+      def native_type_name(type)
+        if type <= Array
+          'list (YAML "- item" lines)'
+        elsif type <= Hash
+          'hash (YAML "key: value" lines)'
+        elsif type <= String
+          'string'
+        else
+          "#{type}"
+        end
       end
     end
   end
